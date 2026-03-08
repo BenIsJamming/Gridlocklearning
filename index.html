@@ -127,6 +127,12 @@ body{background:var(--dark);color:var(--acid);font-family:'Share Tech Mono',mono
 .rgc .rs{font-size:.5rem;opacity:.4;line-height:1.55}
 #respawn-confirm-btn{margin-top:4px;width:190px}
 
+/* ── PAUSE MENU ── */
+#pause-menu{position:fixed;inset:0;background:rgba(0,0,0,.82);display:none;align-items:center;justify-content:center;flex-direction:column;gap:14px;pointer-events:all;z-index:250;backdrop-filter:blur(4px)}
+#pause-menu h2{font-family:'Orbitron',sans-serif;font-size:2rem;letter-spacing:.2em;text-shadow:0 0 20px var(--acid)}
+#pause-menu .pause-code{font-size:.65rem;letter-spacing:.15em;opacity:.5;margin-bottom:4px}
+#pause-menu .pause-btns{display:flex;flex-direction:column;gap:8px;width:220px}
+
 /* ── CLICK TO PLAY ── */
 #click-to-play{position:fixed;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:12px;background:rgba(0,0,0,.72);cursor:pointer;z-index:200;backdrop-filter:blur(3px)}
 #click-to-play .ctp-icon{font-size:2.8rem;animation:bounce 1.5s ease-in-out infinite}
@@ -292,6 +298,16 @@ body{background:var(--dark);color:var(--acid);font-family:'Share Tech Mono',mono
     <div id="respawn-stats" style="font-size:.6rem;opacity:.45;letter-spacing:.1em;margin-top:8px"></div>
   </div>
 
+  <div id="pause-menu">
+    <h2>PAUSED</h2>
+    <div class="pause-code" id="pause-code-display"></div>
+    <div class="pause-btns">
+      <button class="btn" onclick="resumeGame()">▶ RESUME</button>
+      <button class="btn red" id="pause-end-btn" onclick="endLobbyHost()" style="display:none">✕ END LOBBY</button>
+      <button class="btn red" id="pause-leave-btn" onclick="leaveGame()" style="display:none">⬡ LEAVE GAME</button>
+    </div>
+  </div>
+
   <div id="click-to-play" onclick="engageMouse()">
     <div class="ctp-icon">🎯</div>
     <h2>CLICK TO PLAY</h2>
@@ -304,25 +320,9 @@ body{background:var(--dark);color:var(--acid);font-family:'Share Tech Mono',mono
 //  GRIDLOCK · Full FPS · 3 Guns · Sprint/Walk/Crouch · Hit zones
 // ═══════════════════════════════════════════════════════════════
 
-const PEER_SCRIPT = 'https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js';
-// Secure PeerJS config — works on HTTPS hosts like Neocities, Netlify, etc.
-// PeerJS config — no custom host means it uses PeerJS's current live cloud server
-// ICE servers help players behind NAT/routers find each other
-const PEER_CFG = {
-  debug: 0,
-  config: {
-    iceServers: [
-      {urls:'stun:stun.l.google.com:19302'},
-      {urls:'stun:stun1.l.google.com:19302'},
-      {urls:'stun:stun2.l.google.com:19302'},
-      {urls:'stun:stun3.l.google.com:19302'},
-      // Free TURN relay — handles players behind strict firewalls/NAT
-      {urls:'turn:openrelay.metered.ca:80',    username:'openrelayproject',credential:'openrelayproject'},
-      {urls:'turn:openrelay.metered.ca:443',   username:'openrelayproject',credential:'openrelayproject'},
-      {urls:'turn:openrelay.metered.ca:443?transport=tcp', username:'openrelayproject',credential:'openrelayproject'},
-    ]
-  }
-};
+// ── Firebase config (free Realtime Database — no server needed) ──
+const FB_URL = 'https://gridlock-fps-default-rtdb.firebaseio.com';
+// All multiplayer goes through Firebase REST + SSE — works on any static host
 
 // ── MAPS ─────────────────────────────────────────────────────
 const MAP_W = 24, MAP_H = 24;
@@ -632,7 +632,10 @@ function handleDataHost(d,fromConn){
     // relay to all others
     broadcastExcept({t:'pos',pid:fromConn.peer,x:d.x,y:d.y,a:d.a,hp:d.hp,name:d.name,cr:d.cr,col:d.col},fromConn);
   } else if(d.t==='bullet'){
+    // relay to all other clients
     broadcastExcept({...d,pid:fromConn.peer},fromConn);
+    // also add to host's local bullet array so the host can be hit
+    bullets.push({x:d.x,y:d.y,z:d.z,dx:d.dx,dy:d.dy,dz:d.dz,speed:d.spd,drop:d.drop,gun:d.gun,owner:'remote',ownerId:fromConn.peer,life:d.life,damage:d.dmg,rangeBonus:d.rb,traveled:0,hit:false});
   } else if(d.t==='kill'){
     // d.victim is the peerId of the killed player
     if(d.victim===myPeerId){
@@ -707,6 +710,19 @@ function handleDataClient(d){
   if(d.t==='full'){setStatus2('Lobby is full.',true);return;}
   if(d.t==='welcome'){setStatus2(`Lobby joined — ${d.playerCount} player(s). Waiting for host…`);}
   if(d.t==='start'){if(d.map)setMap(d.map);launchGame(false);}
+  if(d.t==='lobbyEnded'){
+    // Host ended the lobby — kick back to main menu
+    if(peer)peer.destroy();
+    conn=null;remotes={};
+    gameRunning=false;soloMode=false;isHost=false;bullets=[];
+    hidePauseMenu();
+    document.getElementById('respawn-screen').style.display='none';
+    document.getElementById('game').style.display='none';
+    document.getElementById('menu').style.display='flex';
+    showPanel('panel-main');
+    setStatus('Host ended the lobby.',true);
+    return;
+  }
   if(d.t==='pos'){
     const pid=d.pid;
     if(!remotes[pid])remotes[pid]={hp:200,name:'PLAYER',colors:{body:'#e05050',head:'#f0c080',legs:'#3060c0'}};
@@ -766,6 +782,7 @@ function launchGame(host){
   }
   isSpectating=false;
   document.getElementById('spectate-bar').style.display='none';
+  hidePauseMenu();
   updateHUD();gameRunning=true;
   showClickToPlay();
   lastTime=performance.now();
@@ -783,15 +800,61 @@ function applyGun(g){
 const MAX_PITCH = Math.PI/2 - 0.01; // allow full 90° up/down
 const SENS = 0.0025;
 
-function engageMouse(){if(!gameRunning)return;const el=document.getElementById('game');(el.requestPointerLock||el.mozRequestPointerLock||function(){}).call(el);}
+function showPauseMenu(){
+  const pm=document.getElementById('pause-menu');
+  pm.style.display='flex';
+  // Show lobby code if multiplayer
+  const cd=document.getElementById('pause-code-display');
+  if(!soloMode&&myCode)cd.textContent='LOBBY CODE: '+myCode;
+  else cd.textContent='';
+  // Show correct button based on role
+  document.getElementById('pause-end-btn').style.display=(!soloMode&&isHost)?'block':'none';
+  document.getElementById('pause-leave-btn').style.display=(!soloMode&&!isHost)?'block':'none';
+}
+function hidePauseMenu(){
+  document.getElementById('pause-menu').style.display='none';
+}
+function resumeGame(){
+  hidePauseMenu();
+  engageMouse();
+}
+function endLobbyHost(){
+  // Tell all clients the lobby is ending
+  broadcastAll({t:'lobbyEnded'});
+  // Tear down
+  if(peer)peer.destroy();
+  conns=[];remotes={};
+  hidePauseMenu();
+  gameRunning=false;
+  soloMode=false;isHost=false;
+  bullets=[];
+  document.getElementById('game').style.display='none';
+  document.getElementById('menu').style.display='flex';
+  showPanel('panel-main');
+  document.getElementById('net-dot').classList.remove('bad');
+}
+function leaveGame(){
+  // Client leaves voluntarily
+  if(conn&&conn.open)try{conn.send({t:'playerLeft',peerId:myPeerId});}catch(e){}
+  if(peer)peer.destroy();
+  conn=null;remotes={};
+  hidePauseMenu();
+  gameRunning=false;
+  soloMode=false;isHost=false;
+  bullets=[];
+  document.getElementById('game').style.display='none';
+  document.getElementById('menu').style.display='flex';
+  showPanel('panel-main');
+}
 function showClickToPlay(){document.getElementById('click-to-play').style.display='flex';}
 function hideClickToPlay(){document.getElementById('click-to-play').style.display='none';}
+function engageMouse(){if(!gameRunning)return;const el=document.getElementById('game');(el.requestPointerLock||el.mozRequestPointerLock||function(){}).call(el);}
 
 document.addEventListener('pointerlockchange',()=>{
   mouseLocked=!!(document.pointerLockElement===document.getElementById('game')||document.mozPointerLockElement===document.getElementById('game'));
-  if(mouseLocked)hideClickToPlay();else if(gameRunning)showClickToPlay();
+  if(mouseLocked){hideClickToPlay();hidePauseMenu();}else if(gameRunning)showPauseMenu();
 });
-document.addEventListener('mozpointerlockchange',()=>{mouseLocked=!!document.mozPointerLockElement;if(mouseLocked)hideClickToPlay();else if(gameRunning)showClickToPlay();});
+document.addEventListener('mozpointerlockchange',()=>{mouseLocked=!!document.mozPointerLockElement;if(mouseLocked){hideClickToPlay();hidePauseMenu();}else if(gameRunning)showPauseMenu();});
 document.addEventListener('mousemove',e=>{
   if(!mouseLocked||!gameRunning)return;
   player.angle+=(e.movementX||e.mozMovementX||0)*SENS;
@@ -803,7 +866,7 @@ document.addEventListener('mousemove',e=>{
 document.addEventListener('keydown',e=>{
   keys[e.code]=true;
   if(e.code==='KeyR'&&gameRunning&&!isSpectating)startReload();
-  if(e.code==='Escape'&&gameRunning)document.exitPointerLock&&document.exitPointerLock();
+  if(e.code==='Escape'&&gameRunning){document.exitPointerLock&&document.exitPointerLock();showPauseMenu();}
   if(e.code==='KeyF'&&gameRunning&&player.gun==='sniper'&&!isSpectating)toggleScope();
   if(e.code==='KeyF'&&isSpectating)exitSpectate();
 });
@@ -872,6 +935,7 @@ function takeDamage(amt,from){
 // ── Respawn ───────────────────────────────────────────────────
 function startRespawn(){
   gameRunning=false;isScoped=false;isSliding=false;slideVelX=0;slideVelY=0;slideTimer=0;
+  hidePauseMenu();
   hideClickToPlay();document.exitPointerLock&&document.exitPointerLock();
   bullets=[];respawnSelectGun(player.gun);
   // Show kill stats on death screen
