@@ -1,2 +1,0 @@
-# Gridlocklearning
-platform
